@@ -526,13 +526,22 @@ When an API token is configured, the TUI refuses remote cleartext HTTP because i
 
 | Key | Action |
 |---|---|
-| `↑` / `↓`, `j` / `k` | Select a mirror |
+| `↑` / `↓`, `j` / `k` | Select a mirror or worker |
+| `Tab` | Switch between mirror list and worker list |
+| `/` | Search mirrors by name; `Enter` keeps the filter, `Esc` clears it |
 | `w` | Cycle the worker filter |
 | `s` | Cycle the status filter |
 | `r` | Refresh immediately |
 | `a`, `x`, `R`, `d` | Start, stop, restart, or disable the selected mirror |
-| `Enter` / `y`, `Esc` / `n` | Confirm or cancel an action |
+| `m` | Toggle manager maintenance mode |
+| `L` | Reload the selected worker's config |
+| `h` | Show recent sync history for the selected mirror (sqlite backend) |
+| `l` | Tail the selected mirror's live log stream |
+| `Enter` on a worker | Filter the mirror list to that worker |
+| `Enter` / `y`, `Esc` / `n` | Confirm or cancel an action; `Esc` also closes history/log |
 | `q`, `Ctrl-C` | Exit and restore the terminal |
+
+The header shows total / syncing / failed / stale counts and whether maintenance mode is on.
 
 The detail pane strips URL userinfo, passwords, queries, and fragments from upstream addresses before rendering them.
 

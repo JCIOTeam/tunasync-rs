@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use serde::Deserialize;
 use std::io::{self, IsTerminal, Stdout};
 use std::time::Duration;
 
@@ -38,21 +39,81 @@ const STATUS_FILTERS: [Option<SyncStatus>; 8] = [
 
 type DashboardTerminal = Terminal<CrosstermBackend<Stdout>>;
 
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum View {
+    #[default]
+    Mirrors,
+    Workers,
+}
+
+#[derive(Clone)]
+enum Pending {
+    Job(ClientCmd),
+    Maintenance { enable: bool },
+    Reload { worker: String },
+}
+
+#[derive(Clone, Default)]
+struct WorkerRow {
+    id: String,
+    last_online: chrono::DateTime<chrono::Utc>,
+    url: String,
+}
+
+#[derive(Clone, Deserialize)]
+struct SyncHistoryEntry {
+    #[allow(dead_code)]
+    mirror: String,
+    worker: String,
+    status: SyncStatus,
+    started: chrono::DateTime<chrono::Utc>,
+    ended: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    transferred_bytes: u64,
+    #[serde(default)]
+    error_msg: String,
+}
+
+#[derive(Clone, Default)]
+struct Overlay {
+    kind: OverlayKind,
+    title: String,
+    lines: Vec<String>,
+    loading: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum OverlayKind {
+    #[default]
+    History,
+    Logs,
+}
+
 #[derive(Default)]
 struct App {
     jobs: Vec<MirrorStatus>,
     workers: Vec<String>,
+    worker_rows: Vec<WorkerRow>,
     worker_filter: Option<String>,
     status_filter: Option<SyncStatus>,
+    search_query: String,
+    search_input: bool,
+    view: View,
     selected: usize,
+    worker_selected: usize,
     table_state: TableState,
-    pending: Option<ClientCmd>,
+    worker_table_state: TableState,
+    pending: Option<Pending>,
+    overlay: Option<Overlay>,
+    maintenance: Option<bool>,
     refreshing: bool,
     command_in_flight: bool,
     status_message: String,
     last_refresh: Option<chrono::DateTime<chrono::Local>>,
     should_quit: bool,
     zh: bool,
+    log_generation: u64,
 }
 
 impl App {
@@ -66,6 +127,7 @@ impl App {
     }
 
     fn visible_job_indices(&self) -> Vec<usize> {
+        let query = self.search_query.to_ascii_lowercase();
         self.jobs
             .iter()
             .enumerate()
@@ -76,9 +138,25 @@ impl App {
                     && self
                         .status_filter
                         .map_or(true, |status| job.status == status)
+                    && (query.is_empty() || job.name.to_ascii_lowercase().contains(&query))
             })
             .map(|(index, _)| index)
             .collect()
+    }
+
+    fn counts(&self) -> (usize, usize, usize, usize) {
+        let syncing = self
+            .jobs
+            .iter()
+            .filter(|job| matches!(job.status, SyncStatus::Syncing | SyncStatus::PreSyncing))
+            .count();
+        let failed = self
+            .jobs
+            .iter()
+            .filter(|job| job.status == SyncStatus::Failed)
+            .count();
+        let stale = self.jobs.iter().filter(|job| job.stale).count();
+        (self.jobs.len(), syncing, failed, stale)
     }
 
     fn visible_jobs(&self) -> Vec<&MirrorStatus> {
@@ -133,7 +211,14 @@ impl App {
                 .filter(|job| snapshot.unavailable_workers.contains(&job.worker))
                 .cloned(),
         );
+        self.worker_rows = snapshot.worker_rows;
+        self.maintenance = snapshot.maintenance.or(self.maintenance);
         self.replace_snapshot(snapshot.workers, jobs);
+        if self.worker_selected >= self.worker_rows.len() {
+            self.worker_selected = self.worker_rows.len().saturating_sub(1);
+        }
+        self.worker_table_state
+            .select((!self.worker_rows.is_empty()).then_some(self.worker_selected));
     }
 
     fn restore_selection(&mut self, identity: Option<&(String, String)>) {
@@ -203,10 +288,49 @@ impl App {
     }
 
     fn begin_action(&mut self, verb: CmdVerb) {
-        if self.command_in_flight {
+        if self.command_in_flight || self.overlay.is_some() {
             return;
         }
-        self.pending = self.command_for_selected(verb);
+        self.pending = self.command_for_selected(verb).map(Pending::Job);
+    }
+
+    fn begin_reload(&mut self) {
+        if self.command_in_flight || self.overlay.is_some() {
+            return;
+        }
+        let worker = match self.view {
+            View::Workers => self
+                .worker_rows
+                .get(self.worker_selected)
+                .map(|row| row.id.clone()),
+            View::Mirrors => self.selected_job().map(|job| job.worker.clone()),
+        };
+        if let Some(worker) = worker {
+            self.pending = Some(Pending::Reload { worker });
+        }
+    }
+
+    fn begin_maintenance_toggle(&mut self) {
+        if self.command_in_flight || self.overlay.is_some() {
+            return;
+        }
+        let enable = !self.maintenance.unwrap_or(false);
+        self.pending = Some(Pending::Maintenance { enable });
+    }
+
+    fn push_search_char(&mut self, ch: char) {
+        if ch.is_control() {
+            return;
+        }
+        self.search_query.push(ch);
+        self.selected = 0;
+        self.sync_table_selection(self.visible_job_indices().len());
+    }
+
+    fn pop_search_char(&mut self) {
+        self.search_query.pop();
+        self.selected = 0;
+        self.sync_table_selection(self.visible_job_indices().len());
     }
 
     fn worker_filter_label(&self) -> &str {
@@ -220,8 +344,10 @@ impl App {
 
 struct Snapshot {
     workers: Vec<String>,
+    worker_rows: Vec<WorkerRow>,
     jobs: Vec<MirrorStatus>,
     unavailable_workers: Vec<String>,
+    maintenance: Option<bool>,
 }
 
 enum BackgroundEvent {
@@ -230,6 +356,22 @@ enum BackgroundEvent {
         verb: CmdVerb,
         mirror: String,
         result: Result<(), String>,
+    },
+    Maintenance {
+        enable: bool,
+        result: Result<(), String>,
+    },
+    History {
+        mirror: String,
+        result: Result<Vec<SyncHistoryEntry>, String>,
+    },
+    LogLine {
+        generation: u64,
+        line: String,
+    },
+    LogEnded {
+        generation: u64,
+        error: Option<String>,
     },
 }
 
@@ -345,6 +487,19 @@ async fn fetch_snapshot(client: &Client) -> Result<Snapshot> {
         "manager returned too many workers ({})",
         workers.len()
     );
+    let maintenance = client
+        .maintenance_status()
+        .await
+        .ok()
+        .and_then(|value| value.get("maintenance").and_then(|flag| flag.as_bool()));
+    let worker_rows: Vec<WorkerRow> = workers
+        .iter()
+        .map(|worker| WorkerRow {
+            id: worker.id.clone(),
+            last_online: worker.last_online,
+            url: worker.url.clone(),
+        })
+        .collect();
     let worker_ids: Vec<String> = workers.into_iter().map(|worker| worker.id).collect();
     let requests = stream::iter(worker_ids.clone().into_iter().map(|worker_id| async move {
         let result = client.list_jobs_of_worker(&worker_id).await;
@@ -371,8 +526,10 @@ async fn fetch_snapshot(client: &Client) -> Result<Snapshot> {
 
     Ok(Snapshot {
         workers: worker_ids,
+        worker_rows,
         jobs,
         unavailable_workers,
+        maintenance,
     })
 }
 
@@ -416,7 +573,13 @@ fn handle_background(
             match result {
                 Ok(()) => {
                     let action = format_command(verb, app.zh);
-                    app.status_message = if app.zh {
+                    app.status_message = if verb == CmdVerb::Reload {
+                        if app.zh {
+                            format!("已向 Worker {mirror:?} 发送重载命令。")
+                        } else {
+                            format!("Sent reload command to worker {mirror:?}.")
+                        }
+                    } else if app.zh {
                         format!("已向镜像 {mirror:?} 发送{action}命令。")
                     } else {
                         format!("Sent {action} command for mirror {mirror:?}.")
@@ -430,6 +593,84 @@ fn handle_background(
                     } else {
                         format!("{action} command failed for mirror {mirror:?}: {error}")
                     };
+                }
+            }
+        }
+        BackgroundEvent::Maintenance { enable, result } => {
+            app.command_in_flight = false;
+            match result {
+                Ok(()) => {
+                    app.maintenance = Some(enable);
+                    app.status_message = if enable {
+                        localized(app.zh, "Maintenance mode enabled.", "已启用维护模式。").to_owned()
+                    } else {
+                        localized(app.zh, "Maintenance mode disabled.", "已关闭维护模式。").to_owned()
+                    };
+                }
+                Err(error) => {
+                    app.status_message = if app.zh {
+                        format!("维护模式切换失败：{error}")
+                    } else {
+                        format!("Failed to change maintenance mode: {error}")
+                    };
+                }
+            }
+        }
+        BackgroundEvent::History { mirror, result } => {
+            let Some(overlay) = app.overlay.as_mut() else {
+                return;
+            };
+            if overlay.kind != OverlayKind::History || overlay.title != mirror {
+                return;
+            }
+            overlay.loading = false;
+            match result {
+                Ok(entries) => {
+                    overlay.lines = if entries.is_empty() {
+                        vec![localized(
+                            app.zh,
+                            "No history (sqlite backend only).",
+                            "没有历史记录（仅 sqlite 后端）。",
+                        )
+                        .to_owned()]
+                    } else {
+                        entries.into_iter().map(|entry| format_history(&entry, app.zh)).collect()
+                    };
+                }
+                Err(error) => {
+                    overlay.lines = vec![if app.zh {
+                        format!("读取历史失败：{error}")
+                    } else {
+                        format!("Failed to load history: {error}")
+                    }];
+                }
+            }
+        }
+        BackgroundEvent::LogLine { generation, line } => {
+            if app.log_generation != generation {
+                return;
+            }
+            if let Some(overlay) = app.overlay.as_mut() {
+                if overlay.kind == OverlayKind::Logs {
+                    overlay.loading = false;
+                    overlay.lines.push(safe_display_text(&line, 240));
+                    if overlay.lines.len() > 200 {
+                        let drop_count = overlay.lines.len() - 200;
+                        overlay.lines.drain(0..drop_count);
+                    }
+                }
+            }
+        }
+        BackgroundEvent::LogEnded { generation, error } => {
+            if app.log_generation != generation {
+                return;
+            }
+            if let Some(overlay) = app.overlay.as_mut() {
+                if overlay.kind == OverlayKind::Logs {
+                    overlay.loading = false;
+                    if let Some(error) = error {
+                        overlay.lines.push(error);
+                    }
                 }
             }
         }
@@ -456,10 +697,44 @@ fn handle_key(
         return;
     }
 
+    if app.search_input {
+        match key.code {
+            KeyCode::Esc => {
+                app.search_input = false;
+                app.search_query.clear();
+                app.selected = 0;
+                app.sync_table_selection(app.visible_job_indices().len());
+            }
+            KeyCode::Enter => app.search_input = false,
+            KeyCode::Backspace => app.pop_search_char(),
+            KeyCode::Char(ch) => app.push_search_char(ch),
+            _ => {}
+        }
+        return;
+    }
+
+    if app.overlay.is_some() {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+            app.log_generation = app.log_generation.wrapping_add(1);
+            app.overlay = None;
+        }
+        return;
+    }
+
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
-        KeyCode::Down | KeyCode::Char('j') => app.select_next(),
-        KeyCode::Up | KeyCode::Char('k') => app.select_previous(),
+        KeyCode::Tab => {
+            app.view = match app.view {
+                View::Mirrors => View::Workers,
+                View::Workers => View::Mirrors,
+            };
+        }
+        KeyCode::Down | KeyCode::Char('j') => select_delta(app, 1),
+        KeyCode::Up | KeyCode::Char('k') => select_delta(app, -1),
+        KeyCode::Char('/') => {
+            app.view = View::Mirrors;
+            app.search_input = true;
+        }
         KeyCode::Char('w') => app.cycle_worker_filter(),
         KeyCode::Char('s') => app.cycle_status_filter(),
         KeyCode::Char('r') => spawn_refresh(client, background_tx, app),
@@ -467,12 +742,184 @@ fn handle_key(
         KeyCode::Char('x') => app.begin_action(CmdVerb::Stop),
         KeyCode::Char('R') => app.begin_action(CmdVerb::Restart),
         KeyCode::Char('d') => app.begin_action(CmdVerb::Disable),
+        KeyCode::Char('m') => app.begin_maintenance_toggle(),
+        KeyCode::Char('L') => app.begin_reload(),
+        KeyCode::Char('h') => open_history(client, background_tx, app),
+        KeyCode::Char('l') => open_logs(client, background_tx, app),
+        KeyCode::Enter if app.view == View::Workers => {
+            if let Some(worker) = app.worker_rows.get(app.worker_selected) {
+                app.worker_filter = Some(worker.id.clone());
+                app.view = View::Mirrors;
+                app.selected = 0;
+                app.sync_table_selection(app.visible_job_indices().len());
+            }
+        }
         _ => {}
     }
 }
 
+fn select_delta(app: &mut App, delta: i32) {
+    match app.view {
+        View::Mirrors => {
+            if delta > 0 {
+                app.select_next();
+            } else {
+                app.select_previous();
+            }
+        }
+        View::Workers => {
+            let len = app.worker_rows.len();
+            if len == 0 {
+                return;
+            }
+            if delta > 0 {
+                app.worker_selected = (app.worker_selected + 1).min(len - 1);
+            } else {
+                app.worker_selected = app.worker_selected.saturating_sub(1);
+            }
+            app.worker_table_state.select(Some(app.worker_selected));
+        }
+    }
+}
+
+fn open_history(client: &Client, background_tx: &mpsc::Sender<BackgroundEvent>, app: &mut App) {
+    let Some(job) = app.selected_job() else {
+        return;
+    };
+    let mirror = job.name.clone();
+    app.overlay = Some(Overlay {
+        kind: OverlayKind::History,
+        title: mirror.clone(),
+        lines: vec![localized(app.zh, "Loading history...", "正在读取历史...").to_owned()],
+        loading: true,
+    });
+    let client = client.clone();
+    let background_tx = background_tx.clone();
+    tokio::spawn(async move {
+        let path = format!("/jobs/{}/history?limit=20", encode_path(&mirror));
+        let result = client
+            .get::<Vec<SyncHistoryEntry>>(&path)
+            .await
+            .map_err(|error| sanitized_error(&client, &error));
+        let _ = background_tx
+            .send(BackgroundEvent::History { mirror, result })
+            .await;
+    });
+}
+
+fn open_logs(client: &Client, background_tx: &mpsc::Sender<BackgroundEvent>, app: &mut App) {
+    let Some(job) = app.selected_job() else {
+        return;
+    };
+    let mirror = job.name.clone();
+    app.log_generation = app.log_generation.wrapping_add(1);
+    let generation = app.log_generation;
+    app.overlay = Some(Overlay {
+        kind: OverlayKind::Logs,
+        title: mirror.clone(),
+        lines: vec![localized(
+            app.zh,
+            "Connecting to log stream...",
+            "正在连接日志流...",
+        )
+        .to_owned()],
+        loading: true,
+    });
+    let client = client.clone();
+    let background_tx = background_tx.clone();
+    tokio::spawn(async move {
+        if let Err(error) = stream_logs(&client, &mirror, generation, &background_tx).await {
+            let _ = background_tx
+                .send(BackgroundEvent::LogEnded {
+                    generation,
+                    error: Some(sanitized_error(&client, &error)),
+                })
+                .await;
+        } else {
+            let _ = background_tx
+                .send(BackgroundEvent::LogEnded {
+                    generation,
+                    error: None,
+                })
+                .await;
+        }
+    });
+}
+
+async fn stream_logs(
+    client: &Client,
+    mirror: &str,
+    generation: u64,
+    background_tx: &mpsc::Sender<BackgroundEvent>,
+) -> Result<()> {
+    use futures::TryStreamExt;
+    let path = format!("/jobs/{}/log/stream", encode_path(mirror));
+    let response = client
+        .auth(client.http.get(client.url(&path)))
+        .send()
+        .await
+        .context("log stream request failed")?
+        .error_for_status()
+        .context("log stream returned error")?;
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    while let Some(chunk) = stream.try_next().await.context("read log stream")? {
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(index) = buffer.find('\n') {
+            let line = buffer[..index].trim_end_matches('\r').to_owned();
+            buffer.drain(..=index);
+            if let Some(data) = line.strip_prefix("data:") {
+                let data = data.trim_start();
+                if !data.is_empty() {
+                    let _ = background_tx
+                        .send(BackgroundEvent::LogLine {
+                            generation,
+                            line: data.to_owned(),
+                        })
+                        .await;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn encode_path(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn format_history(entry: &SyncHistoryEntry, _zh: bool) -> String {
+    let duration = entry
+        .ended
+        .signed_duration_since(entry.started)
+        .num_seconds()
+        .max(0);
+    let error = if entry.error_msg.is_empty() {
+        String::new()
+    } else {
+        format!("  {}", safe_display_text(&entry.error_msg, 80))
+    };
+    format!(
+        "{}  {}  {}s  {}{}",
+        crate::fmt_time(&entry.ended),
+        entry.status.as_str(),
+        duration,
+        safe_display_text(&entry.worker, 40),
+        error
+    )
+}
+
 fn send_pending(client: &Client, background_tx: &mpsc::Sender<BackgroundEvent>, app: &mut App) {
-    let Some(command) = app.pending.take() else {
+    let Some(pending) = app.pending.take() else {
         return;
     };
     if app.command_in_flight {
@@ -482,22 +929,62 @@ fn send_pending(client: &Client, background_tx: &mpsc::Sender<BackgroundEvent>, 
     app.status_message = localized(app.zh, "Sending command...", "正在发送命令...").to_owned();
     let client = client.clone();
     let background_tx = background_tx.clone();
-    tokio::spawn(async move {
-        let verb = command.cmd;
-        let mirror = command.mirror_id.clone();
-        let result = client
-            .send_cmd(command)
-            .await
-            .map(|_| ())
-            .map_err(|error| sanitized_error(&client, &error));
-        let _ = background_tx
-            .send(BackgroundEvent::Command {
-                verb,
-                mirror,
-                result,
-            })
-            .await;
-    });
+    match pending {
+        Pending::Job(command) => {
+            tokio::spawn(async move {
+                let verb = command.cmd;
+                let mirror = command.mirror_id.clone();
+                let result = client
+                    .send_cmd(command)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| sanitized_error(&client, &error));
+                let _ = background_tx
+                    .send(BackgroundEvent::Command {
+                        verb,
+                        mirror,
+                        result,
+                    })
+                    .await;
+            });
+        }
+        Pending::Reload { worker } => {
+            tokio::spawn(async move {
+                let command = ClientCmd {
+                    cmd: CmdVerb::Reload,
+                    mirror_id: String::new(),
+                    worker_id: worker.clone(),
+                    args: Vec::new(),
+                    options: HashMap::new(),
+                };
+                let result = client
+                    .send_cmd(command)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| sanitized_error(&client, &error));
+                let _ = background_tx
+                    .send(BackgroundEvent::Command {
+                        verb: CmdVerb::Reload,
+                        mirror: worker,
+                        result,
+                    })
+                    .await;
+            });
+        }
+        Pending::Maintenance { enable } => {
+            tokio::spawn(async move {
+                let result = if enable {
+                    client.maintenance_enable().await.map(|_| ())
+                } else {
+                    client.maintenance_disable().await.map(|_| ())
+                }
+                .map_err(|error| sanitized_error(&client, &error));
+                let _ = background_tx
+                    .send(BackgroundEvent::Maintenance { enable, result })
+                    .await;
+            });
+        }
+    }
 }
 
 fn redact_url(value: &str) -> String {

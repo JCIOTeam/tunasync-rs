@@ -36,7 +36,34 @@ fn combines_worker_and_status_filters() {
     assert_eq!(visible[0].name, "ubuntu");
 }
 
+
 #[test]
+fn search_filters_visible_jobs_case_insensitively() {
+    let mut app = App::default();
+    app.replace_jobs(vec![
+        job("debian", "edge-a", SyncStatus::Success),
+        job("Ubuntu", "edge-a", SyncStatus::Failed),
+        job("alpine", "edge-b", SyncStatus::Failed),
+    ]);
+    app.search_query = "ubu".to_owned();
+    let visible = app.visible_jobs();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].name, "Ubuntu");
+}
+
+#[test]
+fn counts_include_syncing_failed_and_stale() {
+    let mut app = App::default();
+    let mut stale = job("debian", "edge-a", SyncStatus::Failed);
+    stale.stale = true;
+    app.replace_jobs(vec![
+        stale,
+        job("ubuntu", "edge-a", SyncStatus::Syncing),
+        job("alpine", "edge-b", SyncStatus::Success),
+    ]);
+    assert_eq!(app.counts(), (3, 1, 1, 1));
+}
+
 fn refresh_keeps_selection_by_worker_and_mirror() {
     let mut app = App::default();
     app.replace_jobs(vec![
@@ -105,8 +132,10 @@ fn partial_snapshot_retains_previous_rows_for_unavailable_worker() {
     ]);
     app.apply_snapshot(Snapshot {
         workers: vec!["edge-a".to_owned(), "edge-b".to_owned()],
+        worker_rows: Vec::new(),
         jobs: vec![job("debian", "edge-a", SyncStatus::Syncing)],
         unavailable_workers: vec!["edge-b".to_owned()],
+        maintenance: None,
     });
     assert_eq!(app.jobs.len(), 2);
     assert_eq!(

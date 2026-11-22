@@ -3,9 +3,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
-use tunasync_protocol::{ClientCmd, MirrorStatus, SyncStatus};
+use tunasync_protocol::{MirrorStatus, SyncStatus};
 
-use super::{format_command, localized, redact_url, safe_display_text, App};
+use super::{format_command, localized, redact_url, safe_display_text, App, Overlay, Pending, View};
 use crate::{fmt_status, fmt_time};
 
 pub(super) fn render(frame: &mut Frame<'_>, app: &mut App, manager: &str) {
@@ -15,17 +15,23 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &mut App, manager: &str) {
             Constraint::Length(3),
             Constraint::Min(8),
             Constraint::Length(10),
-            Constraint::Length(3),
+            Constraint::Length(4),
         ])
         .split(frame.area());
 
     render_header(frame, app, manager, chunks[0]);
-    render_jobs(frame, app, chunks[1]);
+    match app.view {
+        View::Mirrors => render_jobs(frame, app, chunks[1]),
+        View::Workers => render_workers(frame, app, chunks[1]),
+    }
     render_detail(frame, app, chunks[2]);
     render_footer(frame, app, chunks[3]);
 
-    if let Some(command) = &app.pending {
-        render_confirmation(frame, command, app.zh);
+    if let Some(overlay) = &app.overlay {
+        render_overlay(frame, overlay, app.zh);
+    }
+    if let Some(pending) = &app.pending {
+        render_confirmation(frame, pending, app.zh);
     }
 }
 
@@ -42,15 +48,28 @@ fn render_header(frame: &mut Frame<'_>, app: &App, manager: &str, area: Rect) {
     } else {
         localized(app.zh, "ready", "就绪")
     };
+    let (total, syncing, failed, stale) = app.counts();
+    let maint = match app.maintenance {
+        Some(true) => localized(app.zh, "MAINT", "维护"),
+        Some(false) => localized(app.zh, "normal", "正常"),
+        None => "-",
+    };
+    let search = if app.search_query.is_empty() && !app.search_input {
+        String::new()
+    } else if app.zh {
+        format!(" | 搜索: {}{}", app.search_query, if app.search_input { "_" } else { "" })
+    } else {
+        format!(" | search: {}{}", app.search_query, if app.search_input { "_" } else { "" })
+    };
     let title = if app.zh {
         format!(
-            " tunasynctl | {manager} | {activity} | 更新 {refreshed} | Worker: {} | 状态: {} ",
+            " tunasynctl | {manager} | {activity} | 更新 {refreshed} | 共{total} 同步{syncing} 失败{failed} stale{stale} | {maint} | Worker: {} | 状态: {}{search} ",
             safe_display_text(app.worker_filter_label(), 80),
             app.status_filter_label()
         )
     } else {
         format!(
-            " tunasynctl | {manager} | {activity} | updated {refreshed} | worker: {} | status: {} ",
+            " tunasynctl | {manager} | {activity} | updated {refreshed} | total {total} syncing {syncing} failed {failed} stale {stale} | {maint} | worker: {} | status: {}{search} ",
             safe_display_text(app.worker_filter_label(), 80),
             app.status_filter_label()
         )
@@ -112,6 +131,50 @@ fn render_jobs(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     )
     .highlight_symbol("› ");
     frame.render_stateful_widget(table, area, &mut app.table_state);
+}
+
+fn render_workers(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let rows = app.worker_rows.iter().map(|worker| {
+        let jobs = app.jobs.iter().filter(|job| job.worker == worker.id);
+        let total = jobs.clone().count();
+        let failed = jobs.clone().filter(|job| job.status == SyncStatus::Failed).count();
+        let syncing = jobs
+            .filter(|job| matches!(job.status, SyncStatus::Syncing | SyncStatus::PreSyncing))
+            .count();
+        Row::new(vec![
+            safe_display_text(&worker.id, 120),
+            fmt_time(&worker.last_online),
+            total.to_string(),
+            failed.to_string(),
+            syncing.to_string(),
+            safe_display_text(&redact_url(&worker.url), 160),
+        ])
+    });
+    let headings = if app.zh {
+        ["Worker", "最后在线", "镜像", "失败", "同步中", "URL"]
+    } else {
+        ["Worker", "Last online", "Mirrors", "Failed", "Syncing", "URL"]
+    };
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Percentage(18),
+            Constraint::Length(20),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Min(12),
+        ],
+    )
+    .header(Row::new(headings).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
+    .block(Block::default().borders(Borders::ALL).title(if app.zh {
+        format!(" Worker ({}) ", app.worker_rows.len())
+    } else {
+        format!(" Workers ({}) ", app.worker_rows.len())
+    }))
+    .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+    .highlight_symbol("› ");
+    frame.render_stateful_widget(table, area, &mut app.worker_table_state);
 }
 
 fn render_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -199,8 +262,8 @@ fn detail_lines(job: &MirrorStatus, zh: bool) -> Vec<Line<'static>> {
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let help = localized(
         app.zh,
-        "↑/↓ j/k select  w worker  s status  r refresh  a start  x stop  R restart  d disable  q quit",
-        "↑/↓ j/k 选择  w Worker  s 状态  r 刷新  a 启动  x 停止  R 重启  d 禁用  q 退出",
+        "j/k Tab /  w s r  a start x stop R restart d disable  m maint  L reload  h history l logs  q quit",
+        "j/k Tab /  w s r  a 启动 x 停止 R 重启 d 禁用  m 维护  L 重载  h 历史 l 日志  q 退出",
     );
     let text = Text::from(vec![
         Line::from(Span::styled(
@@ -215,19 +278,40 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
-fn render_confirmation(frame: &mut Frame<'_>, command: &ClientCmd, zh: bool) {
-    let area = centered_rect(64, 7, frame.area());
-    let mirror = safe_display_text(&command.mirror_id, 120);
-    let worker = safe_display_text(&command.worker_id, 120);
-    let action = format_command(command.cmd, zh);
-    let prompt = if zh {
-        format!(
-            "确认对镜像 {mirror:?}（Worker {worker:?}）执行{action}？\n\nEnter/y 确认，Esc/n 取消"
-        )
-    } else {
-        format!(
-            "Run {action} on mirror {mirror:?} (worker {worker:?})?\n\nEnter/y confirms, Esc/n cancels"
-        )
+fn render_confirmation(frame: &mut Frame<'_>, pending: &Pending, zh: bool) {
+    let area = centered_rect(68, 7, frame.area());
+    let prompt = match pending {
+        Pending::Job(command) => {
+            let mirror = safe_display_text(&command.mirror_id, 120);
+            let worker = safe_display_text(&command.worker_id, 120);
+            let action = format_command(command.cmd, zh);
+            if zh {
+                format!("确认对镜像 {mirror:?}（Worker {worker:?}）执行{action}？\n\nEnter/y 确认，Esc/n 取消")
+            } else {
+                format!("Run {action} on mirror {mirror:?} (worker {worker:?})?\n\nEnter/y confirms, Esc/n cancels")
+            }
+        }
+        Pending::Reload { worker } => {
+            let worker = safe_display_text(worker, 120);
+            if zh {
+                format!("确认让 Worker {worker:?} 重新加载配置？\n\nEnter/y 确认，Esc/n 取消")
+            } else {
+                format!("Reload config on worker {worker:?}?\n\nEnter/y confirms, Esc/n cancels")
+            }
+        }
+        Pending::Maintenance { enable } => {
+            if zh {
+                if *enable {
+                    "确认启用维护模式？维护期间 manager 会拒绝新的同步启动。\n\nEnter/y 确认，Esc/n 取消".to_owned()
+                } else {
+                    "确认关闭维护模式并恢复正常操作？\n\nEnter/y 确认，Esc/n 取消".to_owned()
+                }
+            } else if *enable {
+                "Enable maintenance mode? New sync starts will be rejected.\n\nEnter/y confirms, Esc/n cancels".to_owned()
+            } else {
+                "Disable maintenance mode and resume normal operation?\n\nEnter/y confirms, Esc/n cancels".to_owned()
+            }
+        }
     };
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -239,6 +323,43 @@ fn render_confirmation(frame: &mut Frame<'_>, command: &ClientCmd, zh: bool) {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Yellow))
                     .title(localized(zh, " Confirm action ", " 确认操作 ")),
+            ),
+        area,
+    );
+}
+
+fn render_overlay(frame: &mut Frame<'_>, overlay: &Overlay, zh: bool) {
+    let area = centered_rect(86, 16, frame.area());
+    let title = match overlay.kind {
+        super::OverlayKind::History => {
+            if zh {
+                format!(" 历史 {} ", safe_display_text(&overlay.title, 80))
+            } else {
+                format!(" History {} ", safe_display_text(&overlay.title, 80))
+            }
+        }
+        super::OverlayKind::Logs => {
+            if zh {
+                format!(" 日志 {} ", safe_display_text(&overlay.title, 80))
+            } else {
+                format!(" Logs {} ", safe_display_text(&overlay.title, 80))
+            }
+        }
+    };
+    let body = if overlay.lines.is_empty() {
+        localized(zh, "No output.", "没有输出。").to_owned()
+    } else {
+        overlay.lines.iter().rev().take(12).collect::<Vec<_>>().into_iter().rev().cloned().collect::<Vec<_>>().join("\n")
+    };
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(body)
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title(title),
             ),
         area,
     );
