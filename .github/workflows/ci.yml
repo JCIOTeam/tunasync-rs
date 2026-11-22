@@ -58,19 +58,27 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.temp }}/tunasync-netns-target
         run: |
           sudo install -d -o root -g root -m 0755 /usr/local/libexec
-          TEST_BIN=$(printf '%s\n' "$CARGO_TARGET_DIR"/debug/deps/privileged_smoke-* | \
-            while read -r candidate; do
-              if [ -x "$candidate" ] && [ "${candidate##*.}" != "d" ]; then
-                printf '%s\n' "$candidate"
-                break
-              fi
-            done)
+          # Cargo 1.100+ may place artifacts outside debug/deps. Prefer the
+          # classic debug/<bin> path, then fall back to a recursive search.
+          find_exe() {
+            local name="$1"
+            if [ -x "$CARGO_TARGET_DIR/debug/$name" ]; then
+              printf '%s\n' "$CARGO_TARGET_DIR/debug/$name"
+              return
+            fi
+            find "$CARGO_TARGET_DIR" -type f -name "$name" -executable 2>/dev/null \
+              | sort \
+              | tail -1
+          }
+          TEST_BIN=$(find "$CARGO_TARGET_DIR" -type f -name 'privileged_smoke-*' -executable 2>/dev/null | sort | tail -1)
+          BROKER_BIN=$(find_exe 'tunasync-netns-broker')
+          HELPER_BIN=$(find_exe 'tunasync-netns-smoke-helper')
           test -n "$TEST_BIN"
-          sudo install -o root -g root -m 0755 \
-            "$CARGO_TARGET_DIR/debug/tunasync-netns-broker" \
+          test -n "$BROKER_BIN"
+          test -n "$HELPER_BIN"
+          sudo install -o root -g root -m 0755 "$BROKER_BIN" \
             /usr/local/libexec/tunasync-netns-broker-smoke
-          sudo install -o root -g root -m 0755 \
-            "$CARGO_TARGET_DIR/debug/tunasync-netns-smoke-helper" \
+          sudo install -o root -g root -m 0755 "$HELPER_BIN" \
             /usr/local/libexec/tunasync-netns-smoke-helper
           sudo install -o root -g root -m 0755 "$TEST_BIN" \
             /usr/local/libexec/tunasync-netns-privileged-smoke-test

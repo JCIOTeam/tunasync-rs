@@ -1516,8 +1516,9 @@ mod platform {
             return Err(std::io::Error::last_os_error()).context("fstat pinned file");
         }
         Ok(FileIdentity {
-            dev: stat.st_dev,
-            ino: stat.st_ino,
+            // st_dev/st_ino are u32 on some 32-bit targets (armv7).
+            dev: stat.st_dev as u64,
+            ino: stat.st_ino as u64,
         })
     }
 

@@ -36,7 +36,6 @@ fn combines_worker_and_status_filters() {
     assert_eq!(visible[0].name, "ubuntu");
 }
 
-
 #[test]
 fn search_filters_visible_jobs_case_insensitively() {
     let mut app = App::default();

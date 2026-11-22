@@ -5,7 +5,9 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 use tunasync_protocol::{MirrorStatus, SyncStatus};
 
-use super::{format_command, localized, redact_url, safe_display_text, App, Overlay, Pending, View};
+use super::{
+    format_command, localized, redact_url, safe_display_text, App, Overlay, Pending, View,
+};
 use crate::{fmt_status, fmt_time};
 
 pub(super) fn render(frame: &mut Frame<'_>, app: &mut App, manager: &str) {
@@ -57,9 +59,17 @@ fn render_header(frame: &mut Frame<'_>, app: &App, manager: &str, area: Rect) {
     let search = if app.search_query.is_empty() && !app.search_input {
         String::new()
     } else if app.zh {
-        format!(" | 搜索: {}{}", app.search_query, if app.search_input { "_" } else { "" })
+        format!(
+            " | 搜索: {}{}",
+            app.search_query,
+            if app.search_input { "_" } else { "" }
+        )
     } else {
-        format!(" | search: {}{}", app.search_query, if app.search_input { "_" } else { "" })
+        format!(
+            " | search: {}{}",
+            app.search_query,
+            if app.search_input { "_" } else { "" }
+        )
     };
     let title = if app.zh {
         format!(
@@ -137,7 +147,10 @@ fn render_workers(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let rows = app.worker_rows.iter().map(|worker| {
         let jobs = app.jobs.iter().filter(|job| job.worker == worker.id);
         let total = jobs.clone().count();
-        let failed = jobs.clone().filter(|job| job.status == SyncStatus::Failed).count();
+        let failed = jobs
+            .clone()
+            .filter(|job| job.status == SyncStatus::Failed)
+            .count();
         let syncing = jobs
             .filter(|job| matches!(job.status, SyncStatus::Syncing | SyncStatus::PreSyncing))
             .count();
@@ -153,7 +166,14 @@ fn render_workers(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let headings = if app.zh {
         ["Worker", "最后在线", "镜像", "失败", "同步中", "URL"]
     } else {
-        ["Worker", "Last online", "Mirrors", "Failed", "Syncing", "URL"]
+        [
+            "Worker",
+            "Last online",
+            "Mirrors",
+            "Failed",
+            "Syncing",
+            "URL",
+        ]
     };
     let table = Table::new(
         rows,
@@ -166,13 +186,23 @@ fn render_workers(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             Constraint::Min(12),
         ],
     )
-    .header(Row::new(headings).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
+    .header(
+        Row::new(headings).style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
     .block(Block::default().borders(Borders::ALL).title(if app.zh {
         format!(" Worker ({}) ", app.worker_rows.len())
     } else {
         format!(" Workers ({}) ", app.worker_rows.len())
     }))
-    .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+    .row_highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
     .highlight_symbol("› ");
     frame.render_stateful_widget(table, area, &mut app.worker_table_state);
 }
@@ -349,18 +379,26 @@ fn render_overlay(frame: &mut Frame<'_>, overlay: &Overlay, zh: bool) {
     let body = if overlay.lines.is_empty() {
         localized(zh, "No output.", "没有输出。").to_owned()
     } else {
-        overlay.lines.iter().rev().take(12).collect::<Vec<_>>().into_iter().rev().cloned().collect::<Vec<_>>().join("\n")
+        overlay
+            .lines
+            .iter()
+            .rev()
+            .take(12)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     };
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(body)
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan))
-                    .title(title),
-            ),
+        Paragraph::new(body).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(title),
+        ),
         area,
     );
 }

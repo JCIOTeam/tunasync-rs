@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::io::{self, IsTerminal, Stdout};
 use std::time::Duration;
 
@@ -602,9 +602,11 @@ fn handle_background(
                 Ok(()) => {
                     app.maintenance = Some(enable);
                     app.status_message = if enable {
-                        localized(app.zh, "Maintenance mode enabled.", "已启用维护模式。").to_owned()
+                        localized(app.zh, "Maintenance mode enabled.", "已启用维护模式。")
+                            .to_owned()
                     } else {
-                        localized(app.zh, "Maintenance mode disabled.", "已关闭维护模式。").to_owned()
+                        localized(app.zh, "Maintenance mode disabled.", "已关闭维护模式。")
+                            .to_owned()
                     };
                 }
                 Err(error) => {
@@ -634,7 +636,10 @@ fn handle_background(
                         )
                         .to_owned()]
                     } else {
-                        entries.into_iter().map(|entry| format_history(&entry, app.zh)).collect()
+                        entries
+                            .into_iter()
+                            .map(|entry| format_history(&entry, app.zh))
+                            .collect()
                     };
                 }
                 Err(error) => {
@@ -817,12 +822,9 @@ fn open_logs(client: &Client, background_tx: &mpsc::Sender<BackgroundEvent>, app
     app.overlay = Some(Overlay {
         kind: OverlayKind::Logs,
         title: mirror.clone(),
-        lines: vec![localized(
-            app.zh,
-            "Connecting to log stream...",
-            "正在连接日志流...",
-        )
-        .to_owned()],
+        lines: vec![
+            localized(app.zh, "Connecting to log stream...", "正在连接日志流...").to_owned(),
+        ],
         loading: true,
     });
     let client = client.clone();
