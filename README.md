@@ -498,6 +498,7 @@ tunasynctl list --all -p 14242
 
 # Open the interactive operations dashboard
 tunasynctl tui -p 14242
+tunasynctl tui -p 14242 --refresh 2
 
 # Start / stop / disable / restart a mirror (exact name or glob)
 tunasynctl start  elvish   -p 14242
@@ -537,6 +538,12 @@ When an API token is configured, the TUI refuses remote cleartext HTTP because i
 | `L` | Reload the selected worker's config |
 | `h` | Show recent sync history for the selected mirror (sqlite backend) |
 | `l` | Tail the selected mirror's live log stream |
+| `t` | Next-24h schedule timeline |
+| `M` | Metrics summary (counts, failure rate, last transferred) |
+| `A` | Recent operator audit (requires `notify.audit_log`) |
+| `F` | Flush all disabled mirror rows (confirm) |
+| `D` | Remove the selected worker (confirm) |
+| `S` | Set the selected mirror's size (confirm) |
 | `Enter` on a worker | Filter the mirror list to that worker |
 | `Enter` / `y`, `Esc` / `n` | Confirm or cancel an action; `Esc` also closes history/log |
 | `q`, `Ctrl-C` | Exit and restore the terminal |
@@ -933,3 +940,19 @@ The manager looks up which worker owns the mirror, opens the worker's stream (sh
 ## License
 
 GPL-3.0-or-later, same as upstream.
+
+
+### Alerts and audit
+
+Manager `[notify]` is optional. Empty values disable the feature.
+
+```toml
+[notify]
+webhook_url = "https://hooks.example.com/tunasync"  # POST {"text": "..."}
+stale_after = "48h"
+alert_after_failures = 3
+worker_offline_after = "10m"
+audit_log = "/var/log/tunasync/audit.jsonl"
+```
+
+Webhooks fire on consecutive failures, recovery, stale transitions, and worker offline/online. Audit records start/stop/disable/restart/reload, flush, remove-worker, set-size, and maintenance changes. `tunasynctl tui` can show the last entries with `A`.

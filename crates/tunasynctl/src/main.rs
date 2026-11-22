@@ -258,7 +258,11 @@ enum Command {
         shell: Shell,
     },
     /// Open the interactive operations dashboard.
-    Tui,
+    Tui {
+        /// Refresh interval in seconds.
+        #[arg(long, default_value_t = 5)]
+        refresh: u64,
+    },
     /// Manage global maintenance mode on the manager.
     ///
     /// In maintenance mode the manager rejects all incoming sync-start requests.
@@ -502,6 +506,19 @@ impl Client {
     async fn maintenance_status(&self) -> Result<serde_json::Value> {
         self.get("/maintenance").await
     }
+
+    #[allow(dead_code)]
+    async fn get_text(&self, path: &str) -> Result<String> {
+        self.auth(self.http.get(self.url(path)))
+            .send()
+            .await
+            .context(t!("GET request failed", "GET 请求失败"))?
+            .error_for_status()
+            .context(t!("server returned error", "服务器返回错误"))?
+            .text()
+            .await
+            .context(t!("read response body", "读取响应失败"))
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -731,7 +748,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Completion { .. } => unreachable!(),
 
-        Command::Tui => tui::run(client).await?,
+        Command::Tui { refresh } => tui::run(client, refresh.max(1)).await?,
 
         Command::List {
             worker,

@@ -23,7 +23,6 @@ mod render;
 
 use render::render;
 
-const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_WORKER_FETCHES: usize = 12;
 const MAX_WORKERS: usize = 4096;
 const STATUS_FILTERS: [Option<SyncStatus>; 8] = [
@@ -49,8 +48,21 @@ enum View {
 #[derive(Clone)]
 enum Pending {
     Job(ClientCmd),
-    Maintenance { enable: bool },
-    Reload { worker: String },
+    Maintenance {
+        enable: bool,
+    },
+    Reload {
+        worker: String,
+    },
+    Flush,
+    RemoveWorker {
+        worker: String,
+    },
+    SetSize {
+        worker: String,
+        mirror: String,
+        size: String,
+    },
 }
 
 #[derive(Clone, Default)]
@@ -88,6 +100,9 @@ enum OverlayKind {
     #[default]
     History,
     Logs,
+    Timeline,
+    Metrics,
+    Audit,
 }
 
 #[derive(Default)]
@@ -99,6 +114,7 @@ struct App {
     status_filter: Option<SyncStatus>,
     search_query: String,
     search_input: bool,
+    size_input: Option<(String, String, String)>,
     view: View,
     selected: usize,
     worker_selected: usize,
@@ -310,6 +326,38 @@ impl App {
         }
     }
 
+    fn begin_flush(&mut self) {
+        if self.command_in_flight || self.overlay.is_some() {
+            return;
+        }
+        self.pending = Some(Pending::Flush);
+    }
+
+    fn begin_remove_worker(&mut self) {
+        if self.command_in_flight || self.overlay.is_some() {
+            return;
+        }
+        let worker = match self.view {
+            View::Workers => self
+                .worker_rows
+                .get(self.worker_selected)
+                .map(|row| row.id.clone()),
+            View::Mirrors => self.selected_job().map(|job| job.worker.clone()),
+        };
+        if let Some(worker) = worker {
+            self.pending = Some(Pending::RemoveWorker { worker });
+        }
+    }
+
+    fn begin_set_size(&mut self) {
+        if self.command_in_flight || self.overlay.is_some() {
+            return;
+        }
+        if let Some(job) = self.selected_job() {
+            self.size_input = Some((job.worker.clone(), job.name.clone(), String::new()));
+        }
+    }
+
     fn begin_maintenance_toggle(&mut self) {
         if self.command_in_flight || self.overlay.is_some() {
             return;
@@ -373,6 +421,11 @@ enum BackgroundEvent {
         generation: u64,
         error: Option<String>,
     },
+    Op {
+        label: String,
+        result: Result<(), String>,
+    },
+    Audit(Vec<String>),
 }
 
 struct TerminalGuard;
@@ -384,7 +437,7 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub(super) async fn run(client: Client) -> Result<()> {
+pub(super) async fn run(client: Client, refresh_secs: u64) -> Result<()> {
     let zh = super::is_zh();
     anyhow::ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
@@ -405,7 +458,7 @@ pub(super) async fn run(client: Client) -> Result<()> {
     let _guard = TerminalGuard;
     let mut app = App::new(zh);
     let mut events = EventStream::new();
-    let mut refresh_interval = tokio::time::interval(REFRESH_INTERVAL);
+    let mut refresh_interval = tokio::time::interval(Duration::from_secs(refresh_secs));
     refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let (background_tx, mut background_rx) = mpsc::channel(4);
 
@@ -679,6 +732,34 @@ fn handle_background(
                 }
             }
         }
+        BackgroundEvent::Audit(lines) => {
+            if let Some(overlay) = app.overlay.as_mut() {
+                if overlay.kind == OverlayKind::Audit {
+                    overlay.loading = false;
+                    overlay.lines = lines;
+                }
+            }
+        }
+        BackgroundEvent::Op { label, result } => {
+            app.command_in_flight = false;
+            match result {
+                Ok(()) => {
+                    app.status_message = if app.zh {
+                        format!("{label} 已完成。")
+                    } else {
+                        format!("{label} completed.")
+                    };
+                    spawn_refresh(client, background_tx, app);
+                }
+                Err(error) => {
+                    app.status_message = if app.zh {
+                        format!("{label} 失败：{error}")
+                    } else {
+                        format!("{label} failed: {error}")
+                    };
+                }
+            }
+        }
     }
 }
 
@@ -697,6 +778,38 @@ fn handle_key(
         match key.code {
             KeyCode::Enter | KeyCode::Char('y') => send_pending(client, background_tx, app),
             KeyCode::Esc | KeyCode::Char('n') => app.pending = None,
+            _ => {}
+        }
+        return;
+    }
+
+    if app.size_input.is_some() {
+        match key.code {
+            KeyCode::Esc => app.size_input = None,
+            KeyCode::Enter => {
+                if let Some((worker, mirror, size)) = app.size_input.take() {
+                    let size = size.trim().to_owned();
+                    if !size.is_empty() {
+                        app.pending = Some(Pending::SetSize {
+                            worker,
+                            mirror,
+                            size,
+                        });
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some((_, _, size)) = app.size_input.as_mut() {
+                    size.pop();
+                }
+            }
+            KeyCode::Char(ch) if !ch.is_control() => {
+                if let Some((_, _, size)) = app.size_input.as_mut() {
+                    if size.len() < 32 {
+                        size.push(ch);
+                    }
+                }
+            }
             _ => {}
         }
         return;
@@ -751,6 +864,12 @@ fn handle_key(
         KeyCode::Char('L') => app.begin_reload(),
         KeyCode::Char('h') => open_history(client, background_tx, app),
         KeyCode::Char('l') => open_logs(client, background_tx, app),
+        KeyCode::Char('t') => open_timeline(app),
+        KeyCode::Char('M') => open_metrics(app),
+        KeyCode::Char('A') => open_audit(client, background_tx, app),
+        KeyCode::Char('F') => app.begin_flush(),
+        KeyCode::Char('D') => app.begin_remove_worker(),
+        KeyCode::Char('S') => app.begin_set_size(),
         KeyCode::Enter if app.view == View::Workers => {
             if let Some(worker) = app.worker_rows.get(app.worker_selected) {
                 app.worker_filter = Some(worker.id.clone());
@@ -785,6 +904,129 @@ fn select_delta(app: &mut App, delta: i32) {
             app.worker_table_state.select(Some(app.worker_selected));
         }
     }
+}
+
+fn open_timeline(app: &mut App) {
+    let now = chrono::Utc::now();
+    let horizon = now + chrono::Duration::hours(24);
+    let mut upcoming: Vec<&MirrorStatus> = app
+        .jobs
+        .iter()
+        .filter(|job| job.scheduled > now && job.scheduled <= horizon)
+        .collect();
+    upcoming.sort_by_key(|job| job.scheduled);
+    let lines = if upcoming.is_empty() {
+        vec![localized(
+            app.zh,
+            "No mirrors scheduled in the next 24h.",
+            "未来 24 小时没有排期。",
+        )
+        .to_owned()]
+    } else {
+        upcoming
+            .into_iter()
+            .take(20)
+            .map(|job| {
+                format!(
+                    "{}  {:<16}  {}",
+                    crate::fmt_time(&job.scheduled),
+                    safe_display_text(&job.name, 16),
+                    safe_display_text(&job.worker, 20)
+                )
+            })
+            .collect()
+    };
+    app.overlay = Some(Overlay {
+        kind: OverlayKind::Timeline,
+        title: localized(app.zh, "next 24h", "未来 24h").to_owned(),
+        lines,
+        loading: false,
+    });
+}
+
+fn open_metrics(app: &mut App) {
+    let (total, syncing, failed, stale) = app.counts();
+    let transferred: u64 = app.jobs.iter().map(|job| job.last_transferred_bytes).sum();
+    let rate = if total == 0 {
+        0.0
+    } else {
+        failed as f64 / total as f64 * 100.0
+    };
+    let mut lines = vec![
+        format!(
+            "{}: {total}  {}: {syncing}  {}: {failed}  stale: {stale}",
+            localized(app.zh, "total", "总数"),
+            localized(app.zh, "syncing", "同步中"),
+            localized(app.zh, "failed", "失败"),
+        ),
+        format!(
+            "{}: {rate:.1}%  {}: {}",
+            localized(app.zh, "failure rate", "失败率"),
+            localized(app.zh, "last transferred", "最近传输合计"),
+            render::format_bytes(transferred)
+        ),
+        String::new(),
+    ];
+    let mut by_worker: Vec<(String, usize, usize)> = app
+        .workers
+        .iter()
+        .map(|worker| {
+            let jobs = app.jobs.iter().filter(|job| &job.worker == worker);
+            let n = jobs.clone().count();
+            let bad = jobs.filter(|job| job.status == SyncStatus::Failed).count();
+            (worker.clone(), n, bad)
+        })
+        .collect();
+    by_worker.sort_by(|a, b| b.2.cmp(&a.2).then(b.1.cmp(&a.1)));
+    for (worker, n, bad) in by_worker.into_iter().take(12) {
+        lines.push(format!(
+            "{:<20} mirrors={n:<4} failed={bad}",
+            safe_display_text(&worker, 20)
+        ));
+    }
+    app.overlay = Some(Overlay {
+        kind: OverlayKind::Metrics,
+        title: localized(app.zh, "metrics", "指标").to_owned(),
+        lines,
+        loading: false,
+    });
+}
+
+fn open_audit(client: &Client, background_tx: &mpsc::Sender<BackgroundEvent>, app: &mut App) {
+    app.overlay = Some(Overlay {
+        kind: OverlayKind::Audit,
+        title: localized(app.zh, "audit", "审计").to_owned(),
+        lines: vec![localized(app.zh, "Loading audit...", "正在读取审计...").to_owned()],
+        loading: true,
+    });
+    let client = client.clone();
+    let background_tx = background_tx.clone();
+    let zh = app.zh;
+    tokio::spawn(async move {
+        let lines = match client
+            .get::<Vec<serde_json::Value>>("/audit?limit=30")
+            .await
+        {
+            Ok(entries) if entries.is_empty() => vec![if zh {
+                "没有审计记录（需在 manager 配置 notify.audit_log）。".to_owned()
+            } else {
+                "No audit records (set notify.audit_log on the manager).".to_owned()
+            }],
+            Ok(entries) => entries
+                .into_iter()
+                .rev()
+                .take(20)
+                .map(|entry| {
+                    let time = entry.get("time").and_then(|v| v.as_str()).unwrap_or("-");
+                    let action = entry.get("action").and_then(|v| v.as_str()).unwrap_or("-");
+                    let detail = entry.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+                    format!("{time}  {action}  {detail}")
+                })
+                .collect(),
+            Err(error) => vec![sanitized_error(&client, &error)],
+        };
+        let _ = background_tx.send(BackgroundEvent::Audit(lines)).await;
+    });
 }
 
 fn open_history(client: &Client, background_tx: &mpsc::Sender<BackgroundEvent>, app: &mut App) {
@@ -983,6 +1225,55 @@ fn send_pending(client: &Client, background_tx: &mpsc::Sender<BackgroundEvent>, 
                 .map_err(|error| sanitized_error(&client, &error));
                 let _ = background_tx
                     .send(BackgroundEvent::Maintenance { enable, result })
+                    .await;
+            });
+        }
+        Pending::Flush => {
+            tokio::spawn(async move {
+                let result = client
+                    .flush_disabled()
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| sanitized_error(&client, &error));
+                let _ = background_tx
+                    .send(BackgroundEvent::Op {
+                        label: "flush disabled".to_owned(),
+                        result,
+                    })
+                    .await;
+            });
+        }
+        Pending::RemoveWorker { worker } => {
+            tokio::spawn(async move {
+                let result = client
+                    .remove_worker(&worker)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| sanitized_error(&client, &error));
+                let _ = background_tx
+                    .send(BackgroundEvent::Op {
+                        label: format!("remove worker {worker}"),
+                        result,
+                    })
+                    .await;
+            });
+        }
+        Pending::SetSize {
+            worker,
+            mirror,
+            size,
+        } => {
+            tokio::spawn(async move {
+                let result = client
+                    .set_size(&worker, &mirror, &size)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| sanitized_error(&client, &error));
+                let _ = background_tx
+                    .send(BackgroundEvent::Op {
+                        label: format!("set size {mirror}={size}"),
+                        result,
+                    })
                     .await;
             });
         }

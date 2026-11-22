@@ -44,6 +44,16 @@ pub struct NotifyConfig {
     /// 0 = disabled (only stale triggers alerts).
     #[serde(default)]
     pub alert_after_failures: u32,
+
+    /// Alert when a worker's last heartbeat is older than this duration
+    /// (e.g. `"10m"`, `"1h"`). Empty disables worker-offline detection.
+    #[serde(default)]
+    pub worker_offline_after: String,
+
+    /// Append JSON-lines audit records for operator actions (start, stop,
+    /// disable, flush, remove-worker, set-size, maintenance). Empty disables.
+    #[serde(default)]
+    pub audit_log: String,
 }
 
 /// HTTP server bind settings.

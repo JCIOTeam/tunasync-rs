@@ -137,6 +137,7 @@ pub fn build_router(shared: Arc<AppState>) -> Router {
         .route("/workers/{id}/schedules", post(update_schedules_of_worker))
         .route("/cmd", post(handle_client_cmd))
         .route("/metrics", get(metrics))
+        .route("/audit", get(get_audit))
         .route(
             "/maintenance",
             post(enable_maintenance)
@@ -375,7 +376,14 @@ async fn flush_disabled_jobs(State(state): State<Arc<AppState>>) -> Response {
     }
     match state.db_call(|db| db.flush_disabled_jobs()).await {
         Err(e) => db_err(e),
-        Ok(()) => ok_msg("flushed").into_response(),
+        Ok(()) => {
+            crate::audit::record(
+                &state.notify.audit_log,
+                "flush-disabled",
+                "all disabled jobs",
+            );
+            ok_msg("flushed").into_response()
+        }
     }
 }
 
@@ -427,6 +435,7 @@ async fn delete_worker(State(state): State<Arc<AppState>>, Path(id): Path<String
         Err(e) => db_err(e),
         Ok(()) => {
             tracing::info!(id = %id, "worker deleted");
+            crate::audit::record(&state.notify.audit_log, "remove-worker", &id);
             ok_msg("deleted").into_response()
         }
     }
@@ -716,6 +725,11 @@ async fn update_mirror_size(
         size = %status.size,
         "mirror size update"
     );
+    crate::audit::record(
+        &state.notify.audit_log,
+        "set-size",
+        &format!("{} on {} -> {}", status.name, status.worker, status.size),
+    );
 
     match state
         .db_call(move |db| db.update_mirror_status(&worker_id, &msg.name, status))
@@ -811,6 +825,14 @@ async fn handle_client_cmd(
         mirror = %client_cmd.mirror_id,
         worker = %worker_id,
         "posting command to worker"
+    );
+    crate::audit::record(
+        &state.notify.audit_log,
+        "cmd",
+        &format!(
+            "{} {} on {}",
+            client_cmd.cmd, client_cmd.mirror_id, worker_id
+        ),
     );
 
     let request = state.http_client.post(&worker.url).json(&worker_cmd);
@@ -913,6 +935,7 @@ async fn enable_maintenance(State(state): State<Arc<AppState>>) -> impl IntoResp
         .maintenance
         .store(true, std::sync::atomic::Ordering::Relaxed);
     tracing::info!("maintenance mode ENABLED — all mutating endpoints will return 503");
+    crate::audit::record(&state.notify.audit_log, "maintenance", "enabled");
     ok_msg("maintenance mode enabled")
 }
 
@@ -922,6 +945,7 @@ async fn disable_maintenance(State(state): State<Arc<AppState>>) -> impl IntoRes
         .maintenance
         .store(false, std::sync::atomic::Ordering::Relaxed);
     tracing::info!("maintenance mode DISABLED — normal operations resumed");
+    crate::audit::record(&state.notify.audit_log, "maintenance", "disabled");
     ok_msg("maintenance mode disabled")
 }
 
@@ -932,6 +956,20 @@ async fn get_maintenance(State(state): State<Arc<AppState>>) -> impl IntoRespons
 }
 
 // Metrics
+
+/// `GET /audit?limit=N` — newest operator actions (JSON lines from the audit file).
+/// Returns `[]` when audit logging is disabled or the file does not exist yet.
+async fn get_audit(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl axum::response::IntoResponse {
+    let limit = q
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(50)
+        .clamp(1, 200);
+    axum::Json(crate::audit::recent(&state.notify.audit_log, limit))
+}
 
 /// `GET /metrics` — Prometheus text exposition (format version 0.0.4).
 ///

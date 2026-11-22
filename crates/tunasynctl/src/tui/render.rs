@@ -35,6 +35,9 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &mut App, manager: &str) {
     if let Some(pending) = &app.pending {
         render_confirmation(frame, pending, app.zh);
     }
+    if let Some((worker, mirror, size)) = &app.size_input {
+        render_size_input(frame, worker, mirror, size, app.zh);
+    }
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &App, manager: &str, area: Rect) {
@@ -292,8 +295,8 @@ fn detail_lines(job: &MirrorStatus, zh: bool) -> Vec<Line<'static>> {
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let help = localized(
         app.zh,
-        "j/k Tab /  w s r  a start x stop R restart d disable  m maint  L reload  h history l logs  q quit",
-        "j/k Tab /  w s r  a 启动 x 停止 R 重启 d 禁用  m 维护  L 重载  h 历史 l 日志  q 退出",
+        "j/k Tab /  a/x/R/d  m L  F flush D rm-worker S size  t timeline M metrics A audit  h/l  q",
+        "j/k Tab /  a/x/R/d  m L  F 清空 D 删Worker S 改大小  t 排期 M 指标 A 审计  h/l  q",
     );
     let text = Text::from(vec![
         Line::from(Span::styled(
@@ -342,6 +345,38 @@ fn render_confirmation(frame: &mut Frame<'_>, pending: &Pending, zh: bool) {
                 "Disable maintenance mode and resume normal operation?\n\nEnter/y confirms, Esc/n cancels".to_owned()
             }
         }
+        Pending::Flush => {
+            if zh {
+                "确认清空所有已禁用的镜像记录？此操作不可恢复。\n\nEnter/y 确认，Esc/n 取消"
+                    .to_owned()
+            } else {
+                "Flush all disabled mirror rows? This cannot be undone.\n\nEnter/y confirms, Esc/n cancels".to_owned()
+            }
+        }
+        Pending::RemoveWorker { worker } => {
+            let worker = safe_display_text(worker, 120);
+            if zh {
+                format!("确认从 manager 删除 Worker {worker:?}？\n\nEnter/y 确认，Esc/n 取消")
+            } else {
+                format!(
+                    "Remove worker {worker:?} from the manager?\n\nEnter/y confirms, Esc/n cancels"
+                )
+            }
+        }
+        Pending::SetSize {
+            worker,
+            mirror,
+            size,
+        } => {
+            let worker = safe_display_text(worker, 80);
+            let mirror = safe_display_text(mirror, 80);
+            let size = safe_display_text(size, 32);
+            if zh {
+                format!("确认把镜像 {mirror:?}（Worker {worker:?}）的大小设为 {size:?}？\n\nEnter/y 确认，Esc/n 取消")
+            } else {
+                format!("Set size of {mirror:?} on {worker:?} to {size:?}?\n\nEnter/y confirms, Esc/n cancels")
+            }
+        }
     };
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -353,6 +388,38 @@ fn render_confirmation(frame: &mut Frame<'_>, pending: &Pending, zh: bool) {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Yellow))
                     .title(localized(zh, " Confirm action ", " 确认操作 ")),
+            ),
+        area,
+    );
+}
+
+fn render_size_input(frame: &mut Frame<'_>, worker: &str, mirror: &str, size: &str, zh: bool) {
+    let area = centered_rect(60, 7, frame.area());
+    let prompt = if zh {
+        format!(
+            "为镜像 {}（Worker {}）设置大小\n\n{}\n\nEnter 确认，Esc 取消",
+            safe_display_text(mirror, 40),
+            safe_display_text(worker, 40),
+            if size.is_empty() { "_" } else { size }
+        )
+    } else {
+        format!(
+            "Set size for {} on {}\n\n{}\n\nEnter confirms, Esc cancels",
+            safe_display_text(mirror, 40),
+            safe_display_text(worker, 40),
+            if size.is_empty() { "_" } else { size }
+        )
+    };
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(prompt)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title(localized(zh, " Set size ", " 设置大小 ")),
             ),
         area,
     );
@@ -373,6 +440,27 @@ fn render_overlay(frame: &mut Frame<'_>, overlay: &Overlay, zh: bool) {
                 format!(" 日志 {} ", safe_display_text(&overlay.title, 80))
             } else {
                 format!(" Logs {} ", safe_display_text(&overlay.title, 80))
+            }
+        }
+        super::OverlayKind::Timeline => {
+            if zh {
+                " 未来 24h 排期 ".to_owned()
+            } else {
+                " Next 24h schedule ".to_owned()
+            }
+        }
+        super::OverlayKind::Metrics => {
+            if zh {
+                " 指标 ".to_owned()
+            } else {
+                " Metrics ".to_owned()
+            }
+        }
+        super::OverlayKind::Audit => {
+            if zh {
+                " 审计 ".to_owned()
+            } else {
+                " Audit ".to_owned()
             }
         }
     };
@@ -436,7 +524,7 @@ fn status_style(status: SyncStatus) -> Style {
     Style::default().fg(color)
 }
 
-fn format_bytes(bytes: u64) -> String {
+pub(super) fn format_bytes(bytes: u64) -> String {
     if bytes == 0 {
         return "-".to_owned();
     }

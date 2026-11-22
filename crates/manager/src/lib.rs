@@ -5,6 +5,7 @@
 
 #![warn(rust_2018_idioms)]
 
+pub mod audit;
 pub mod config;
 pub mod db;
 pub mod server;
@@ -171,6 +172,26 @@ pub async fn run_with_config(cfg: ManagerConfig) -> Result<()> {
             tracing::warn!(
                 stale_after = %cfg.notify.stale_after,
                 "invalid stale_after duration — stale detector not started"
+            );
+        }
+    }
+
+    if !cfg.notify.worker_offline_after.is_empty() {
+        if let Some(offline_secs) =
+            tunasync_common::util::parse_duration_secs(&cfg.notify.worker_offline_after)
+        {
+            let state_clone = std::sync::Arc::clone(&state);
+            tokio::spawn(async move {
+                worker_offline_detector(state_clone, offline_secs).await;
+            });
+            tracing::info!(
+                worker_offline_after = %cfg.notify.worker_offline_after,
+                "worker offline detector started"
+            );
+        } else {
+            tracing::warn!(
+                worker_offline_after = %cfg.notify.worker_offline_after,
+                "invalid worker_offline_after duration — detector not started"
             );
         }
     }
@@ -470,6 +491,63 @@ async fn stale_detector(state: std::sync::Arc<AppState>, stale_secs: u64) {
                 );
             }
         }
+    }
+}
+
+/// Background task: alert when a worker's last heartbeat is older than
+/// `offline_secs`. Recovers (and notifies) when the worker checks in again.
+async fn worker_offline_detector(state: std::sync::Arc<AppState>, offline_secs: u64) {
+    use std::collections::HashSet;
+    use std::time::Duration;
+    use tokio::time;
+
+    let mut interval = time::interval(Duration::from_secs(60));
+    interval.tick().await;
+    let mut offline: HashSet<String> = HashSet::new();
+
+    loop {
+        interval.tick().await;
+        let workers = match state.db_call(|db| db.list_workers()).await {
+            Ok(workers) => workers,
+            Err(error) => {
+                tracing::warn!(%error, "worker_offline_detector: list workers failed");
+                continue;
+            }
+        };
+        let now = chrono::Utc::now();
+        let mut seen = HashSet::new();
+        for worker in workers {
+            seen.insert(worker.id.clone());
+            let age = now.signed_duration_since(worker.last_online).num_seconds();
+            let is_offline = age > offline_secs as i64;
+            if is_offline && offline.insert(worker.id.clone()) {
+                let text = format!(
+                    "Worker {} is OFFLINE — last heartbeat {} ({}s ago)",
+                    worker.id,
+                    worker.last_online.format("%Y-%m-%d %H:%M UTC"),
+                    age
+                );
+                tracing::warn!(worker = %worker.id, age_secs = age, "worker offline");
+                if !state.notify.webhook_url.is_empty() {
+                    let client = state.http_client.clone();
+                    let url = state.notify.webhook_url.clone();
+                    tokio::spawn(async move {
+                        crate::webhook::send(&client, &url, &text).await;
+                    });
+                }
+            } else if !is_offline && offline.remove(&worker.id) {
+                let text = format!("Worker {} is back online", worker.id);
+                tracing::info!(worker = %worker.id, "worker recovered");
+                if !state.notify.webhook_url.is_empty() {
+                    let client = state.http_client.clone();
+                    let url = state.notify.webhook_url.clone();
+                    tokio::spawn(async move {
+                        crate::webhook::send(&client, &url, &text).await;
+                    });
+                }
+            }
+        }
+        offline.retain(|id| seen.contains(id));
     }
 }
 
