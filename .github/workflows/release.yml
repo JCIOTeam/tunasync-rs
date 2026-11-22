@@ -112,6 +112,26 @@ jobs:
           printf '[target.%s]\nlinker = "%s"\n' \
             "${{ matrix.target }}" "${{ matrix.linker }}" >> .cargo/config.toml
 
+      # rustc 1.100 passes -Wl,--no-rosegment. Ubuntu 24.04's loongarch64
+      # binutils 2.42 does not understand that flag, so wrap gcc and drop it.
+      - name: Wrap loongarch64 linker for older binutils
+        if: matrix.target == 'loongarch64-unknown-linux-gnu'
+        run: |
+          sudo tee /usr/local/bin/loongarch64-linux-gnu-gcc-wrap >/dev/null << 'EOF'
+          #!/bin/bash
+          filtered=()
+          for arg in "$@"; do
+            case "$arg" in
+              -Wl,--no-rosegment|--no-rosegment) ;;
+              *) filtered+=("$arg") ;;
+            esac
+          done
+          exec loongarch64-linux-gnu-gcc-14 "${filtered[@]}"
+          EOF
+          sudo chmod 0755 /usr/local/bin/loongarch64-linux-gnu-gcc-wrap
+          mkdir -p .cargo
+          printf '[target.loongarch64-unknown-linux-gnu]\nlinker = "/usr/local/bin/loongarch64-linux-gnu-gcc-wrap"\n' > .cargo/config.toml
+
       # Export CC_<triple> and CXX_<triple> so ring and sqlite3-sys build
       # scripts (via cc-rs) find the right cross-compiler.
       # Skipped for zigbuild targets — zig provides its own toolchain.
