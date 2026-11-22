@@ -191,10 +191,14 @@ impl TwoStageRsyncProvider {
             rsync_env.insert("RSYNC_PASSWORD".into(), mc.password.clone());
         }
 
-        let mut success_exit_codes = mc.success_exit_codes.clone();
-        success_exit_codes.extend(global.dangerous_global_success_exit_codes.iter());
-        success_exit_codes.extend(global.dangerous_global_rsync_success_exit_codes.iter());
-        success_exit_codes.extend(mc.rsync_success_exit_codes.iter());
+        // Merge success exit codes to match Go's newMirrorProvider exactly.
+        let success_exit_codes = super::merge_success_exit_codes(
+            &global.dangerous_global_success_exit_codes,
+            &mc.success_exit_codes,
+            &global.dangerous_global_rsync_success_exit_codes,
+            &mc.rsync_success_exit_codes,
+            true,
+        );
 
         let disk_quota_bytes = if mc.disk_quota.is_empty() {
             0

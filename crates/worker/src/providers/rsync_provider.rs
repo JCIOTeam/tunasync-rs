@@ -153,11 +153,15 @@ impl RsyncProvider {
             rsync_env.insert("RSYNC_PASSWORD".into(), mc.password.clone());
         }
 
-        // Merge global success exit codes.
-        let mut success_exit_codes = mc.success_exit_codes.clone();
-        success_exit_codes.extend(global.dangerous_global_success_exit_codes.iter());
-        success_exit_codes.extend(global.dangerous_global_rsync_success_exit_codes.iter());
-        success_exit_codes.extend(mc.rsync_success_exit_codes.iter());
+        // Merge success exit codes to match Go's newMirrorProvider exactly
+        // (global first, then mirror, then rsync-specific; first-seen order preserved).
+        let success_exit_codes = super::merge_success_exit_codes(
+            &global.dangerous_global_success_exit_codes,
+            &mc.success_exit_codes,
+            &global.dangerous_global_rsync_success_exit_codes,
+            &mc.rsync_success_exit_codes,
+            true,
+        );
 
         // Parse disk quota — empty or unparseable = 0 = no check.
         let disk_quota_bytes = if mc.disk_quota.is_empty() {

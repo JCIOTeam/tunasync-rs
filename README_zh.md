@@ -378,6 +378,11 @@ interval = 120
 retry = 3
 timeout = 600
 
+# 额外视为成功的退出码（对所有镜像生效，请谨慎使用）
+# dangerous_global_success_exit_codes = [10]
+# 仅对 rsync / two-stage-rsync 生效的额外成功退出码，推荐 23、24
+# dangerous_global_rsync_success_exit_codes = [23, 24]
+
 # 时区设置（可选，默认 UTC）
 # timezone = "Asia/Shanghai"
 
@@ -403,6 +408,8 @@ name = "elvish"
 provider = "rsync"
 upstream = "rsync://rsync.elv.sh/elvish/"
 use_ipv4 = true
+# success_exit_codes = [20]
+# rsync_success_exit_codes = [23, 24]  # 仅 rsync 生效，与上面追加合并
 # cron = "0 3 * * *"
 # interval = 60           # 分钟；单镜像间隔示例
 # timezone = "Asia/Shanghai"

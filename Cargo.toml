@@ -38,8 +38,8 @@ async-trait = "0.1"
 axum        = { version = "0.8", features = ["json"] }
 # Use tls-rustls-no-provider so axum-server does NOT force aws-lc-rs.
 # We register ring as the crypto provider at startup (see crates/tunasync/src/main.rs).
-axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
-reqwest     = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+axum-server = { version = "0.9", features = ["tls-rustls-no-provider"] }
+reqwest     = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 # Declare rustls directly so we can pin the crypto backend to ring only.
 # ring cross-compiles cleanly to all targets (loongarch64, riscv64, etc.)
 # via pure-C fallback; aws-lc-rs (the other backend) does not support
@@ -49,14 +49,14 @@ rustls      = { version = "0.23", default-features = false, features = ["ring", 
 # Serde / config
 serde       = { version = "1",   features = ["derive"] }
 serde_json  = "1"
-toml        = "0.8"
+toml        = "1"
 
 # Time
 chrono      = { version = "0.4", features = ["serde"] }
 chrono-tz   = "0.10"
 humantime         = "2"
 humantime-serde   = "1"
-cron        = "0.16"
+cron        = "0.17"
 
 # Logging / errors
 tracing             = "0.1"
@@ -65,16 +65,16 @@ thiserror           = "2"
 anyhow              = "1"
 
 # Storage
-redb     = "2"
-rusqlite = { version = "0.32", features = ["bundled"] }
-redis    = "0.27"
+redb     = "5"
+rusqlite = { version = "0.43", features = ["bundled"] }
+redis    = "1"
 
 # CLI
 clap          = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
-crossterm     = { version = "0.28", features = ["event-stream"] }
-ratatui       = "0.29"
-# Ratatui 0.29 permits newer releases that raised their MSRV above this
+crossterm     = { version = "0.29", features = ["event-stream"] }
+ratatui       = "0.30"
+# Ratatui 0.30 permits newer releases that raised their MSRV above this
 # workspace's Rust 1.80 floor. Keep the compatible versions in the graph.
 instability          = "=0.3.7"
 unicode-segmentation = "=1.12.0"
@@ -87,7 +87,7 @@ os_pipe     = "1"
 url         = { version = "2", features = ["serde"] }
 once_cell   = "1"
 bytes       = "1"
-sha2        = "0.10"
+sha2        = "0.11"
 
 [profile.release]
 lto           = "thin"

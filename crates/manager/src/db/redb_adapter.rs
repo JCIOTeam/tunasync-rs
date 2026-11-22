@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use chrono::Utc;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use tunasync_protocol::{MirrorStatus, SyncStatus, WorkerStatus};
 
 use super::{status_key, worker_id_from_key, DbAdapter, DbError, DbResult};
@@ -67,10 +67,12 @@ impl DbAdapter for RedbAdapter {
     fn get_worker(&self, id: &str) -> DbResult<WorkerStatus> {
         let tx = self.db.begin_read()?;
         let table = tx.open_table(WORKERS)?;
-        match table.get(id)? {
+        // Bind the result so the AccessGuard is dropped before `table`.
+        let result = match table.get(id)? {
             Some(v) => Ok(serde_json::from_slice(v.value())?),
             None => Err(DbError::NotFound(format!("worker {id:?}"))),
-        }
+        };
+        result
     }
 
     fn delete_worker(&self, id: &str) -> DbResult<()> {
@@ -128,12 +130,14 @@ impl DbAdapter for RedbAdapter {
         let key = status_key(mirror_id, worker_id);
         let tx = self.db.begin_read()?;
         let table = tx.open_table(MIRROR_STATUS)?;
-        match table.get(key.as_str())? {
+        // Bind the result so the AccessGuard is dropped before `table`.
+        let result = match table.get(key.as_str())? {
             Some(v) => Ok(serde_json::from_slice(v.value())?),
             None => Err(DbError::NotFound(format!(
                 "mirror {mirror_id:?} on worker {worker_id:?}"
             ))),
-        }
+        };
+        result
     }
 
     fn list_mirror_status(&self, worker_id: &str) -> DbResult<Vec<MirrorStatus>> {

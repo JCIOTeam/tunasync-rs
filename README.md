@@ -384,6 +384,12 @@ interval = 120                           # Default sync interval in minutes
 retry = 3                                # Default retry count on failure
 timeout = 600                            # Default timeout in seconds (0 = no timeout)
 
+# Extra exit codes treated as success for all mirrors (use with caution).
+# dangerous_global_success_exit_codes = [10]
+# Rsync-specific extra success exit codes (only applied to rsync / two-stage-rsync).
+# Merged after the general codes. Recommended values: 23, 24.
+# dangerous_global_rsync_success_exit_codes = [23, 24]
+
 # Timezone for cron expressions and blackout windows.
 # Defaults to UTC when unset. Use IANA names: "Asia/Shanghai", "Europe/Berlin", etc.
 # timezone = "UTC"
@@ -413,6 +419,8 @@ name = "elvish"
 provider = "rsync"
 upstream = "rsync://rsync.elv.sh/elvish/"
 use_ipv4 = true
+# success_exit_codes = [20]          # additional success codes for this mirror
+# rsync_success_exit_codes = [23, 24]  # rsync-only, merged with the above
 # interval = 60           # minutes
 # cron = "0 3 * * *"     # alternative: cron schedule (overrides interval)
 # timezone = "Asia/Shanghai"  # per-mirror timezone (overrides [global].timezone)
